@@ -1,0 +1,29 @@
+name: 每日科技新闻
+
+on:
+  schedule:
+    # 每天 19:00 北京时间 (11:00 UTC)
+    - cron: "0 11 * * *"
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  send-news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 发送每日科技新闻
+        env:
+          QQ_AUTH_CODE: ${{ secrets.QQ_AUTH_CODE }}
+        run: python send_news.py
