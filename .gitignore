@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境变量（包含敏感凭据）
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+*.orig
+
+# 临时文件
+/tmp/
+*.log

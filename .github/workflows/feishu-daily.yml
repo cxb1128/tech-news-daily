@@ -1,0 +1,39 @@
+name: 飞书知识库-每日简报
+
+on:
+  schedule:
+    # 每天 7:00, 12:00, 19:00 北京时间
+    # UTC = CST - 8
+    - cron: "30 23 * * *"   # 7:30 CST
+    - cron: "0 4 * * *"     # 12:00 CST
+    - cron: "0 11 * * *"    # 19:00 CST
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  daily-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          pip install requests feedparser python-dotenv
+
+      - name: 执行每日 Pipeline
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_SPACE_ID: ${{ secrets.FEISHU_SPACE_ID }}
+          FEISHU_BITABLE_TOKEN: ${{ secrets.FEISHU_BITABLE_TOKEN }}
+          FEISHU_STATS_TABLE_ID: ${{ secrets.FEISHU_STATS_TABLE_ID }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          python feishu_pipeline.py daily

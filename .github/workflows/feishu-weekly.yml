@@ -1,0 +1,34 @@
+name: 飞书知识库-每周复盘
+
+on:
+  schedule:
+    # 每周日 21:00 北京时间
+    - cron: "0 13 * * 0"  # UTC 13:00 = CST 21:00 (Sunday)
+  workflow_dispatch:
+
+jobs:
+  weekly-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install requests feedparser python-dotenv
+
+      - name: 执行每周复盘
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_SPACE_ID: ${{ secrets.FEISHU_SPACE_ID }}
+          FEISHU_BITABLE_TOKEN: ${{ secrets.FEISHU_BITABLE_TOKEN }}
+          FEISHU_STATS_TABLE_ID: ${{ secrets.FEISHU_STATS_TABLE_ID }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: python feishu_pipeline.py weekly
