@@ -176,7 +176,7 @@ def generate_html(entries, count=15):
     html += """</ol>
 
 <hr style="margin-top:24px">
-<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天晚上 7:00（北京时间）| RSS 聚合，无 AI 参与</p>"""
+<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| RSS 聚合，无 AI 参与</p>"""
 
     return html
 
