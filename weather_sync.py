@@ -20,6 +20,17 @@ from datetime import datetime, timedelta, timezone
 import requests
 from feishu_sync import FeishuClient
 
+# ── 加载 .env ──
+env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(env_file):
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                if key.strip() not in os.environ:
+                    os.environ[key.strip()] = val.strip()
+
 CST = timezone(timedelta(hours=8))
 FEISHU_BITABLE_TOKEN = os.environ.get("FEISHU_BITABLE_TOKEN", "")
 FEISHU_WEATHER_TABLE_ID = os.environ.get("FEISHU_WEATHER_TABLE_ID", "")
@@ -104,13 +115,11 @@ def sync_to_bitable(weather_data: dict) -> bool:
             FEISHU_WEATHER_TABLE_ID,
             {
                 "日期": int(now.timestamp() * 1000),
-                "城市": weather_data.get("city", "Shanghai"),
-                "天气": weather_data.get("weather", "N/A"),
-                "温度范围": temp_str,
-                "备注": (
-                    f"湿度: {weather_data.get('humidity', 'N/A')}%, "
-                    f"风速: {weather_data.get('wind_speed', 'N/A')} km/h"
-                ),
+                "天气状况": weather_data.get("weather", "N/A"),
+                "温度(°C)": temp_str,
+                "湿度": f"{weather_data.get('humidity', 'N/A')}%",
+                "风力": f"{weather_data.get('wind_speed', 'N/A')} km/h",
+                "记录时间": int(now.timestamp() * 1000),
             },
         )
         print(f"✅ 天气同步成功: {weather_data.get('weather')}, {temp_str}")

@@ -125,7 +125,8 @@ class FeishuClient:
         body = {
             "space_id": space_id,
             "title": title,
-            "obj_type": "doc",
+            "obj_type": "docx",
+            "node_type": "origin",
         }
         if parent_node_token:
             body["parent_node_token"] = parent_node_token
@@ -165,29 +166,58 @@ class FeishuClient:
         data = self._request("POST", "/docx/v1/documents", json=body)
         return data["data"]["document"]["document_id"]
 
+    @staticmethod
+    def _strip_inline_markdown(text: str) -> str:
+        """
+        移除 Markdown 内联格式，转为纯文本。
+        飞书 Docx API 的 text_run.content 不支持 Markdown 语法。
+        """
+        import re
+        # 1. 图片 ![...](...) → [图片: alt]
+        text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'[图片: \1]', text)
+        # 2. 链接 [text](url) → text（直接丢弃 URL 避免过长）
+        text = re.sub(r'\[([^\]]*)\]\([^)]+\)', r'\1', text)
+        # 3. 粗体 **text** 或 __text__
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        text = re.sub(r'__(.+?)__', r'\1', text)
+        # 4. 斜体 *text* 或 _text_（小心不匹配 **）
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
+        text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'\1', text)
+        # 5. 行内代码 `code`
+        text = re.sub(r'`([^`]+)`', r'\1', text)
+        # 6. 删除线 ~~text~~
+        text = re.sub(r'~~(.+?)~~', r'\1', text)
+        # 7. 长 URL → 缩短标记（超过 80 字符的 URL 容易导致 API 拒绝）
+        text = re.sub(r'https?://\S{80,}', r'[链接]', text)
+        # 8. 清理可能残留的零宽字符和不间断空格
+        text = text.replace('​', '').replace(' ', ' ')
+        text = text.replace('‌', '').replace('‍', '')
+        text = text.replace('﻿', '')
+        # 9. 清理多余空白
+        text = re.sub(r' +', ' ', text)
+        text = text.strip()
+        return text
+
     def update_doc_content(self, document_id: str, markdown_content: str) -> None:
         """
         更新文档内容。
-        飞书文档使用块（Block）结构，这里做简化：替换全部内容。
+        使用飞书文档块（Block）API 替换全部内容。
+        自动将 Markdown 转为飞书 Docx 支持的纯文本块。
         """
-        # 先获取现有块
-        blocks_data = self._request(
-            "GET",
-            f"/docx/v1/documents/{document_id}/blocks",
-            params={"page_size": 500},
-        )
-        existing_blocks = blocks_data.get("data", {}).get("items", [])
-        # 收集 block_id（跳过页面根块）
-        block_ids = [
-            b["block_id"]
-            for b in existing_blocks
-            if b.get("block_type") != "page"
-        ]
-
-        # 批量删除旧块
-        if block_ids:
-            # 飞书文档 API 需要逐个或小批量删除
-            for bid in block_ids[:50]:  # 单次最多50个
+        # 先获取现有块并删除
+        try:
+            blocks_data = self._request(
+                "GET",
+                f"/docx/v1/documents/{document_id}/blocks",
+                params={"page_size": 500},
+            )
+            existing_blocks = blocks_data.get("data", {}).get("items", [])
+            block_ids = [
+                b["block_id"]
+                for b in existing_blocks
+                if b.get("block_type") != 1  # page type
+            ]
+            for bid in block_ids:
                 try:
                     self._request(
                         "DELETE",
@@ -196,17 +226,66 @@ class FeishuClient:
                     )
                 except Exception:
                     pass
+        except Exception:
+            pass  # 新文档可能没有旧块
 
-        # 将 Markdown 转换为飞书块结构并写入
-        blocks = self._markdown_to_blocks(markdown_content)
+        # 将 Markdown 拆分为段落
+        raw_paragraphs = [p.strip() for p in markdown_content.strip().split("\n\n") if p.strip()]
 
-        # 逐个写入文本块
-        for block in blocks:
-            self._request(
-                "POST",
-                f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
-                json={"children": [block], "index": -1},
-            )
+        # 逐个写入
+        written = 0
+        failed = 0
+        for i, para in enumerate(raw_paragraphs):
+            try:
+                lines = para.split("\n")
+                first_line = lines[0].strip()
+
+                if first_line.startswith("### "):
+                    text = self._strip_inline_markdown(first_line[4:])
+                    block = self._heading_block(text, 3)
+                elif first_line.startswith("## "):
+                    text = self._strip_inline_markdown(first_line[3:])
+                    block = self._heading_block(text, 2)
+                elif first_line.startswith("# "):
+                    text = self._strip_inline_markdown(first_line[2:])
+                    block = self._heading_block(text, 1)
+                elif first_line.startswith("- ") or first_line.startswith("* "):
+                    text = self._strip_inline_markdown(first_line[2:])[:2000]
+                    block = self._bullet_block(text)
+                elif first_line.startswith("> "):
+                    # 引用块
+                    quote_text = "\n".join(
+                        l[2:] if l.startswith("> ") else l
+                        for l in lines
+                    )
+                    text = self._strip_inline_markdown(quote_text)[:2000]
+                    block = self._quote_block(text)
+                elif first_line.strip() in ("---", "***", "___"):
+                    # 分隔线
+                    block = {"block_type": 22, "divider": {}}
+                else:
+                    # 普通文本块 - 必须先 strip markdown，限制 2000 字符
+                    text = self._strip_inline_markdown("\n".join(lines))[:2000]
+                    block = self._text_block(text)
+
+                self._request(
+                    "POST",
+                    f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                    json={"children": [block], "index": -1},
+                )
+                written += 1
+            except Exception as e:
+                failed += 1
+                if failed <= 5:
+                    # 只打印前几个错误，避免刷屏
+                    preview = para[:80].replace("\n", " ")
+                    print(f"  ⚠️  段落{i}写入失败: {preview}... → {e}")
+                continue
+
+        if failed > 0:
+            print(f"  📝 写入 {written}/{written+failed} 段（{failed} 段跳过）")
+        else:
+            print(f"  📝 全部 {written} 段写入成功")
 
     def _markdown_to_blocks(self, content: str) -> List[Dict]:
         """
@@ -303,7 +382,7 @@ class FeishuClient:
 
     def _text_block(self, text: str) -> Dict:
         return {
-            "block_type": 1,
+            "block_type": 2,  # text = 2 (1 = page)
             "text": {
                 "elements": [{"text_run": {"content": text}}],
                 "style": {},
@@ -321,7 +400,7 @@ class FeishuClient:
 
     def _bullet_block(self, text: str) -> Dict:
         return {
-            "block_type": 13,
+            "block_type": 12,
             "bullet": {
                 "elements": [{"text_run": {"content": text}}],
                 "style": {},
@@ -330,7 +409,7 @@ class FeishuClient:
 
     def _ordered_block(self, text: str) -> Dict:
         return {
-            "block_type": 14,
+            "block_type": 13,
             "ordered": {
                 "elements": [{"text_run": {"content": text}}],
                 "style": {},
@@ -339,7 +418,7 @@ class FeishuClient:
 
     def _code_block(self, text: str, language: str = "") -> Dict:
         return {
-            "block_type": 15,
+            "block_type": 14,
             "code": {
                 "elements": [{"text_run": {"content": text}}],
                 "style": {"language": 1 if not language else 1},
@@ -348,7 +427,7 @@ class FeishuClient:
 
     def _quote_block(self, text: str) -> Dict:
         return {
-            "block_type": 17,
+            "block_type": 15,
             "quote": {
                 "elements": [{"text_run": {"content": text}}],
                 "style": {},

@@ -27,7 +27,24 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 
 import feedparser
+import ssl
 from feishu_sync import FeishuClient
+
+# ── SSL 兼容处理 ─────────────────────────────────────
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+# ── 加载 .env ─────────────────────────────────────────
+_env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_file):
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                if _k.strip() not in os.environ:
+                    os.environ[_k.strip()] = _v.strip()
 
 # ── 配置 ──────────────────────────────────────────────
 CST = timezone(timedelta(hours=8))
@@ -41,29 +58,46 @@ FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL", "")
 FEISHU_DAILY_TABLE_ID = os.environ.get("FEISHU_DAILY_TABLE_ID", "")  # 每日打卡表
 FEISHU_STATS_TABLE_ID = os.environ.get("FEISHU_STATS_TABLE_ID", "")  # 知识统计表
 
-# 知识库节点结构（对应「第二大脑」知识库的节点）
+# 知识库节点结构（与实际 wiki 节点对应）
+# 从 wiki_nodes.json 加载，如果有的话
+_wiki_nodes_path = os.path.join(os.path.dirname(__file__), "wiki_nodes.json")
+WIKI_NODES = {}
+if os.path.exists(_wiki_nodes_path):
+    with open(_wiki_nodes_path) as f:
+        WIKI_NODES = json.load(f)
+
 KNOWLEDGE_TREE = {
-    "1-INBOX": {
-        "title": "1-INBOX（收件箱）",
+    "📥 收件箱": {
+        "node_token": WIKI_NODES.get("📥 收件箱", ""),
         "parent": None,
         "description": "待分类的原始素材",
     },
-    "2-知识图谱": {
-        "title": "2-知识图谱",
+    "📋 每日简报": {
+        "node_token": WIKI_NODES.get("📋 每日简报", ""),
+        "parent": None,
+    },
+    "📊 每周回顾": {
+        "node_token": WIKI_NODES.get("📊 每周回顾", ""),
+        "parent": None,
+    },
+    "🗂️ 分类归档": {
+        "node_token": WIKI_NODES.get("🗂️ 分类归档", ""),
         "parent": None,
         "children": {
-            "ai-models": {"title": "AI & 大模型", "keywords": ["AI", "GPT", "OpenAI", "大模型", "LLM", "Claude", "Gemini", "DeepSeek", "Copilot", "Agent"]},
-            "semiconductor": {"title": "半导体 & 硬件", "keywords": ["芯片", "Nvidia", "GPU", "Intel", "AMD", "ARM", "半导体", "制程", "光刻"]},
-            "robotics": {"title": "机器人 & 自动驾驶", "keywords": ["机器人", "人形", "自动驾驶", "Tesla", "Waymo", "无人机"]},
-            "business": {"title": "商业 & 创投", "keywords": ["融资", "IPO", "上市", "收购", "市值", "股价", "投资"]},
-            "product": {"title": "产品 & 设计", "keywords": ["App", "发布", "更新", "设计", "UX", "产品"]},
-            "research": {"title": "科研前沿", "keywords": ["论文", "研究", "Science", "Nature", "arXiv", "量子", "核聚变"]},
-            "growth": {"title": "个人成长", "keywords": ["效率", "学习", "习惯", "方法论", "读书"]},
+            "ai-ml": {"title": "AI & 机器学习", "node_token": WIKI_NODES.get("AI & 机器学习", ""),
+                      "keywords": ["AI", "GPT", "OpenAI", "大模型", "LLM", "Claude", "Gemini", "DeepSeek", "Agent"]},
+            "coding": {"title": "编程技术", "node_token": WIKI_NODES.get("编程技术", ""),
+                       "keywords": ["代码", "编程", "开源", "GitHub", "Python", "Rust", "框架", "架构"]},
+            "tech-biz": {"title": "科技商业", "node_token": WIKI_NODES.get("科技商业", ""),
+                         "keywords": ["融资", "IPO", "上市", "收购", "市值", "股价", "投资", "商业"]},
+            "product": {"title": "产品设计", "node_token": WIKI_NODES.get("产品设计", ""),
+                        "keywords": ["App", "发布", "更新", "设计", "UX", "产品"]},
+            "opensource": {"title": "开源动态", "node_token": WIKI_NODES.get("开源动态", ""),
+                           "keywords": ["开源", "GitHub", "Linux", "基金会", "License"]},
+            "tools": {"title": "效率工具", "node_token": WIKI_NODES.get("效率工具", ""),
+                      "keywords": ["工具", "效率", "自动化", "Notion", "Obsidian", "插件"]},
         },
     },
-    "3-每日简报": {"title": "3-每日简报", "parent": None},
-    "4-每周复盘": {"title": "4-每周复盘", "parent": None},
-    "5-输出成果": {"title": "5-输出成果", "parent": None},
 }
 
 # 与 send_news.py 共享的 RSS 源
@@ -93,7 +127,12 @@ def fetch_all_feeds() -> List[Dict]:
     for source, url in RSS_FEEDS.items():
         try:
             print(f"  📡 {source} ...", end=" ", flush=True)
-            feed = feedparser.parse(url)
+            import urllib.request
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            })
+            data = urllib.request.urlopen(req, timeout=15, context=_SSL_CONTEXT).read()
+            feed = feedparser.parse(data)
             count = len(feed.entries)
             print(f"{count} 条")
 
@@ -162,7 +201,7 @@ def classify_with_claude(entries: List[Dict]) -> List[Dict]:
 
     categories = "\n".join(
         f"- **{v['title']}** (key={k}): {', '.join(v.get('keywords', ['通用']))}"
-        for k, v in KNOWLEDGE_TREE.get("2-知识图谱", {}).get("children", {}).items()
+        for k, v in KNOWLEDGE_TREE.get("🗂️ 分类归档", {}).get("children", {}).items()
     )
 
     prompt = f"""你是知识管理专家。请分析以下科技新闻，给出分类和重要性评估。
@@ -201,12 +240,13 @@ importance 评分 1-10:
         with open(prompt_file, "w", encoding="utf-8") as f:
             f.write(prompt)
 
-        # 调用 claude CLI
+        # 调用 claude CLI (--print flag + prompt as positional arg)
         result = subprocess.run(
-            ["claude", "--print", "--prompt", prompt],
+            ["claude", "--print", prompt],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
+            env={**os.environ, "HOME": os.environ.get("HOME", "/Users/apple")},
         )
 
         if result.returncode != 0:
@@ -275,16 +315,11 @@ def generate_daily_brief(classified_entries: List[Dict]) -> str:
             by_category[cat] = []
         by_category[cat].append(entry)
 
-    cat_names = {
-        c["children"][k]["title"]: k
-        for c in [KNOWLEDGE_TREE.get("2-知识图谱", {})]
-        for k in c.get("children", {})
-    }
     # 反向映射
     key_to_name = {}
-    if "2-知识图谱" in KNOWLEDGE_TREE:
-        for k, v in KNOWLEDGE_TREE["2-知识图谱"]["children"].items():
-            key_to_name[k] = v["title"]
+    cat_node = KNOWLEDGE_TREE.get("🗂️ 分类归档", {})
+    for k, v in cat_node.get("children", {}).items():
+        key_to_name[k] = v["title"]
 
     # 构建简报
     lines = [
@@ -353,22 +388,26 @@ def publish_to_feishu(
 
     today = datetime.now(CST)
 
-    # 1. 发布每日简报到知识库
+    # 1. 发布每日简报到知识库「📋 每日简报」节点下
     if mode in ("daily", "weekly"):
         week_label = today.strftime("%Y-W%W")
         date_label = today.strftime("%Y-%m-%d")
 
-        # 创建周文件夹（如果不存在的话先尝试创建页面）
         if mode == "daily":
             title = f"{date_label} 日报"
         else:
             title = f"{week_label} 周报"
+
+        # 使用已有的「📋 每日简报」或「📊 每周回顾」节点作为父节点
+        parent_key = "📋 每日简报" if mode == "daily" else "📊 每周回顾"
+        parent_token = WIKI_NODES.get(parent_key, "")
 
         try:
             node_token = client.create_knowledge_page(
                 space_id=FEISHU_SPACE_ID,
                 title=title,
                 content=brief_content,
+                parent_node_token=parent_token,
             )
             result["brief_node_token"] = node_token
             print(f"  ✅ 简报已发布: {title}")
@@ -393,12 +432,12 @@ def publish_to_feishu(
                 f"---\n\n"
             )
         try:
-            # 注意：这里需要在知识库中找到 INBOX 节点
-            # 简化处理：直接创建新页面
+            inbox_parent = WIKI_NODES.get("📥 收件箱", "")
             client.create_knowledge_page(
                 space_id=FEISHU_SPACE_ID,
                 title=f"📥 {today.strftime('%m%d')} 重要资讯",
                 content=inbox_content,
+                parent_node_token=inbox_parent,
             )
             result["inbox_created"] = "ok"
             print(f"  ✅ INBOX 已更新: {len(important_entries)} 条重要资讯")
@@ -413,8 +452,8 @@ def publish_to_feishu(
                 FEISHU_STATS_TABLE_ID,
                 {
                     "日期": int(today.timestamp() * 1000),
-                    "知识库新增页面数": 1 if result.get("brief_node_token") else 0,
-                    "今日阅读文章数": len(classified_entries),
+                    "文章阅读数": len(classified_entries),
+                    "任务完成数": 1 if result.get("brief_node_token") else 0,
                 },
             )
             result["stats_updated"] = "ok"
@@ -509,7 +548,7 @@ def main():
                 FEISHU_DAILY_TABLE_ID,
                 {
                     "日期": int(today.timestamp() * 1000),
-                    "日记内容": f"自动同步于 {today.strftime('%Y-%m-%d %H:%M')}",
+                    "今日笔记": f"自动同步于 {today.strftime('%Y-%m-%d %H:%M')}",
                 },
             )
             print("   ✅ 同步完成")
