@@ -34,6 +34,8 @@ jobs:
           FEISHU_SPACE_ID: ${{ secrets.FEISHU_SPACE_ID }}
           FEISHU_BITABLE_TOKEN: ${{ secrets.FEISHU_BITABLE_TOKEN }}
           FEISHU_STATS_TABLE_ID: ${{ secrets.FEISHU_STATS_TABLE_ID }}
+          FEISHU_DAILY_TABLE_ID: ${{ secrets.FEISHU_DAILY_TABLE_ID }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python feishu_pipeline.py daily

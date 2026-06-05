@@ -184,19 +184,10 @@ def deduplicate(entries: List[Dict]) -> List[Dict]:
 
 # ── AI 处理（调用 Claude Code） ──────────────────────
 
-def classify_with_claude(entries: List[Dict]) -> List[Dict]:
-    """
-    使用 Claude Code CLI 对条目进行分类和摘要。
-
-    由于 Claude Code CLI 是非交互式工具，这里通过创建临时
-    prompt 文件 + `claude --print` 模式来调用。
-    """
-    if not entries:
-        return entries
-
-    # 构建 prompt
+def _build_classification_prompt(entries: List[Dict]) -> str:
+    """构建分类 prompt"""
     entries_text = ""
-    for i, e in enumerate(entries[:50]):  # 单次处理最多 50 条
+    for i, e in enumerate(entries[:50]):
         entries_text += f"{i+1}. [{e['source']}] {e['title']}\n   URL: {e['link']}\n   摘要: {e.get('summary', 'N/A')[:200]}\n\n"
 
     categories = "\n".join(
@@ -204,7 +195,7 @@ def classify_with_claude(entries: List[Dict]) -> List[Dict]:
         for k, v in KNOWLEDGE_TREE.get("🗂️ 分类归档", {}).get("children", {}).items()
     )
 
-    prompt = f"""你是知识管理专家。请分析以下科技新闻，给出分类和重要性评估。
+    return f"""你是知识管理专家。请分析以下科技新闻，给出分类和重要性评估。
 
 ## 可用分类
 {categories}
@@ -218,7 +209,7 @@ def classify_with_claude(entries: List[Dict]) -> List[Dict]:
 [
   {{
     "index": 1,
-    "category_key": "ai-models",
+    "category_key": "ai-ml",
     "importance": 8,
     "summary_cn": "一句话中文摘要",
     "tags": ["标签1", "标签2"],
@@ -234,13 +225,89 @@ importance 评分 1-10:
 
 请只输出 JSON 数组，不要任何额外文字。"""
 
-    try:
-        # 写入临时 prompt 文件
-        prompt_file = "/tmp/feishu_pipeline_prompt.txt"
-        with open(prompt_file, "w", encoding="utf-8") as f:
-            f.write(prompt)
 
-        # 调用 claude CLI (--print flag + prompt as positional arg)
+def _parse_classification_output(output: str) -> List[Dict]:
+    """解析 AI 输出中的 JSON 数组"""
+    output = output.strip()
+    if "```json" in output:
+        output = output.split("```json")[1].split("```")[0]
+    elif "```" in output:
+        output = output.split("```")[1].split("```")[0]
+    return json.loads(output)
+
+
+def _apply_classifications(entries: List[Dict], classifications: List[Dict]) -> List[Dict]:
+    """将分类结果合并回条目"""
+    class_map = {c["index"]: c for c in classifications}
+    for i, entry in enumerate(entries):
+        idx = i + 1
+        if idx in class_map:
+            c = class_map[idx]
+            entry["category_key"] = c.get("category_key", "other")
+            entry["importance"] = c.get("importance", 5)
+            entry["ai_summary"] = c.get("summary_cn", "")
+            entry["tags"] = c.get("tags", [])
+            entry["why_important"] = c.get("why_important", "")
+        else:
+            entry["category_key"] = "other"
+            entry["importance"] = 3
+            entry["ai_summary"] = entry["title"]
+            entry["tags"] = []
+            entry["why_important"] = ""
+    return entries
+
+
+def classify_via_api(entries: List[Dict]) -> List[Dict]:
+    """
+    通过 Anthropic API 直接调用 Claude 分类。
+    需要设置 ANTHROPIC_API_KEY 环境变量。
+    适用于 GitHub Actions / launchd 等非交互环境。
+    """
+    import requests as req
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("未设置 ANTHROPIC_API_KEY")
+
+    prompt = _build_classification_prompt(entries)
+
+    resp = req.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=120,
+    )
+    data = resp.json()
+    if resp.status_code != 200:
+        raise RuntimeError(f"Anthropic API 错误: {data.get('error', {}).get('message', data)}")
+
+    content = data["content"][0]["text"]
+    classifications = _parse_classification_output(content)
+    return _apply_classifications(entries, classifications)
+
+
+def classify_with_claude(entries: List[Dict]) -> List[Dict]:
+    """
+    使用 Claude Code CLI 或 Anthropic API 对条目进行分类和摘要。
+
+    优先使用 Claude Code CLI（`claude --print`），
+    如果失败则 fallback 到 Anthropic API（需要 ANTHROPIC_API_KEY）。
+    """
+    if not entries:
+        return entries
+
+    prompt = _build_classification_prompt(entries)
+
+    # ── 方案 1: Claude Code CLI ──
+    try:
         result = subprocess.run(
             ["claude", "--print", prompt],
             capture_output=True,
@@ -249,44 +316,25 @@ importance 评分 1-10:
             env={**os.environ, "HOME": os.environ.get("HOME", "/Users/apple")},
         )
 
-        if result.returncode != 0:
-            print(f"⚠️  Claude CLI 错误: {result.stderr[:200]}")
-            return entries
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            try:
+                classifications = _parse_classification_output(output)
+                return _apply_classifications(entries, classifications)
+            except json.JSONDecodeError:
+                print(f"⚠️  Claude CLI 输出 JSON 解析失败，尝试 API fallback...")
+        else:
+            print(f"⚠️  Claude CLI 失败 (code={result.returncode})，尝试 API fallback...")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"⚠️  Claude CLI 不可用 ({e})，尝试 API fallback...")
 
-        # 解析 JSON 结果
-        output = result.stdout.strip()
-        # Claude 可能输出中带有 markdown 代码块标记
-        if "```json" in output:
-            output = output.split("```json")[1].split("```")[0]
-        elif "```" in output:
-            output = output.split("```")[1].split("```")[0]
-
-        classifications = json.loads(output)
-
-        # 将分类结果合并回条目
-        class_map = {c["index"]: c for c in classifications}
-        for i, entry in enumerate(entries):
-            idx = i + 1
-            if idx in class_map:
-                c = class_map[idx]
-                entry["category_key"] = c.get("category_key", "other")
-                entry["importance"] = c.get("importance", 5)
-                entry["ai_summary"] = c.get("summary_cn", "")
-                entry["tags"] = c.get("tags", [])
-                entry["why_important"] = c.get("why_important", "")
-            else:
-                entry["category_key"] = "other"
-                entry["importance"] = 3
-                entry["ai_summary"] = entry["title"]
-                entry["tags"] = []
-                entry["why_important"] = ""
-
-    except subprocess.TimeoutExpired:
-        print("⚠️  Claude CLI 超时")
-    except json.JSONDecodeError as e:
-        print(f"⚠️  JSON 解析失败: {e}")
+    # ── 方案 2: Anthropic API ──
+    try:
+        print("   🔄 使用 Anthropic API...")
+        return classify_via_api(entries)
     except Exception as e:
-        print(f"⚠️  AI 分类失败: {e}")
+        print(f"⚠️  API fallback 也失败: {e}")
+        print("   ⚠️  将使用默认分类（全部归为 other）")
 
     return entries
 
