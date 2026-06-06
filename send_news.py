@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 每日科技新闻邮件发送脚本
-通过 RSS 聚合全球科技媒体头条，生成 HTML 邮件并通过 QQ 邮箱发送。
-GitHub Actions 每天 19:00 CST 自动运行。
+通过 RSS 聚合全球科技媒体头条，英文标题自动翻译为中文，生成 HTML 邮件并通过 QQ 邮箱发送。
+GitHub Actions 每天早上 6:10 CST 自动运行。
 """
 
 import feedparser
@@ -36,7 +36,7 @@ feedparser.USER_AGENT = USER_AGENT
 opener = urllib.request.build_opener()
 opener.addheaders = [("User-Agent", USER_AGENT)]
 
-# RSS 源列表 — 已验证的可靠源
+# RSS 源列表
 RSS_FEEDS = {
     # 英文源
     "TechCrunch": "https://techcrunch.com/feed/",
@@ -69,13 +69,6 @@ def get_date_display():
 def fetch_feeds():
     """拉取所有 RSS 源"""
     all_entries = []
-
-    # 如果本地 SSL 有问题（macOS Python 常见），跳过验证
-    ssl_context = None
-    try:
-        ssl_context = ssl.create_default_context()
-    except Exception:
-        pass
 
     for source, url in RSS_FEEDS.items():
         try:
@@ -111,6 +104,53 @@ def fetch_feeds():
     return all_entries
 
 
+def is_mostly_english(text):
+    """判断文本是否主要为英文（需要翻译）"""
+    # 统计中文字符
+    chinese_chars = len(re.findall(r'[一-鿿]', text))
+    # 如果中文字符 >= 2 个，认为已经是中文
+    return chinese_chars < 2
+
+
+def translate_titles(entries):
+    """将英文标题翻译为中文（使用 Google Translate，免费无需 API key）"""
+    from deep_translator import GoogleTranslator
+
+    # 找出所有需要翻译的条目索引
+    to_translate = []
+    for i, entry in enumerate(entries):
+        if is_mostly_english(entry["title"]):
+            to_translate.append(i)
+
+    if not to_translate:
+        print("  🌐 所有标题已是中文，无需翻译")
+        return entries
+
+    print(f"  🌐 翻译 {len(to_translate)} 条英文标题...")
+
+    # 批量翻译（GoogleTranslator 内部会处理）
+    translator = GoogleTranslator(source='auto', target='zh-CN')
+    batch_size = 20
+
+    for batch_start in range(0, len(to_translate), batch_size):
+        batch_indices = to_translate[batch_start:batch_start + batch_size]
+        batch_texts = [entries[i]["title"] for i in batch_indices]
+
+        try:
+            translated = translator.translate_batch(batch_texts)
+            for idx, zh_title in zip(batch_indices, translated):
+                if zh_title and zh_title != entries[idx]["title"]:
+                    # 保留原标题用于参考，翻译结果作为主标题
+                    entries[idx]["title_en"] = entries[idx]["title"]
+                    entries[idx]["title"] = zh_title
+            print(f"    ✅ 已翻译 {len(batch_texts)} 条")
+        except Exception as e:
+            print(f"    ⚠️  翻译失败 ({e})，保留原文", file=sys.stderr)
+            # 翻译失败不阻塞流程，保留原标题
+
+    return entries
+
+
 def score_entry(entry):
     """打分：日期越近 + 关键词匹配 = 越高分"""
     score = 0
@@ -133,9 +173,11 @@ def score_entry(entry):
         "人形", "Agent", "代理", "开源", "收购", "上市", "突破",
         "Intel", "AMD", "ARM", "DeepSeek", "Starlink", "Copilot",
     ]
+    # 同时检查原标题和翻译后的标题
     title_lower = entry["title"].lower()
+    title_en = entry.get("title_en", "")
     for kw in hot_keywords:
-        if kw.lower() in title_lower:
+        if kw.lower() in title_lower or kw.lower() in title_en.lower():
             score += 5
 
     return score
@@ -170,13 +212,19 @@ def generate_html(entries, count=15):
     for entry in entries[:count]:
         source = escape(entry["source"])
         title = escape(entry["title"])
+        title_en = entry.get("title_en", "")
         link = escape(entry["link"])
-        html += f'  <li><b>{source}</b> — {title} 🔗 <a href="{link}">来源</a></li>\n'
+
+        if title_en:
+            # 有英文原题，显示中英对照
+            html += f'  <li><b>[{source}]</b> {title} <br><small style="color:#888">({escape(title_en)})</small> <a href="{link}">🔗</a></li>\n'
+        else:
+            html += f'  <li><b>[{source}]</b> {title} <a href="{link}">🔗</a></li>\n'
 
     html += """</ol>
 
 <hr style="margin-top:24px">
-<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| RSS 聚合，无 AI 参与</p>"""
+<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| RSS 聚合 + Google 翻译，无 AI 参与</p>"""
 
     return html
 
@@ -219,31 +267,38 @@ def main():
 
     if len(entries) == 0:
         print("❌ 未拉取到任何新闻，请检查网络或 RSS 源状态", file=sys.stderr)
-        # 不发送空邮件
         sys.exit(0)
 
-    # 2. 打分排序
+    # 2. 翻译英文标题
+    print()
+    entries = translate_titles(entries)
+
+    # 3. 打分排序
     entries.sort(key=score_entry, reverse=True)
 
-    # 3. 去重
+    # 4. 去重
     entries = deduplicate(entries)
     print(f"📋 去重后剩余 {len(entries)} 条")
 
-    # 4. 取前 15
+    # 5. 取前 15
     top_n = min(len(entries), 15)
     print(f"✨ 精选前 {top_n} 条发送")
 
-    # 5. 生成 HTML
+    # 6. 生成 HTML
     html = generate_html(entries, count=top_n)
 
-    # 6. 发送
+    # 7. 发送
     print("\n📧 发送邮件...")
     send_email(html)
 
-    # 7. 摘要
+    # 8. 摘要
     print("\n📰 今日新闻摘要：")
     for i, entry in enumerate(entries[:top_n]):
-        print(f"  {i+1}. [{entry['source']}] {entry['title'][:80]}")
+        title_en = entry.get("title_en", "")
+        if title_en:
+            print(f"  {i+1}. [{entry['source']}] {entry['title'][:60]} ({title_en[:60]})")
+        else:
+            print(f"  {i+1}. [{entry['source']}] {entry['title'][:60]}")
 
 
 if __name__ == "__main__":
