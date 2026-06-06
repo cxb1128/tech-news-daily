@@ -22,3 +22,14 @@ Thumbs.db
 # 临时文件
 /tmp/
 *.log
+__pycache__/
+*.pyc
+logs/
+research_state.json
+add_knowledge.py
+cleanup_kb.py
+weekly_research.py
+feishu_*.py
+github_stats_sync.py
+weather_sync.py
+test_feishu_auth.py

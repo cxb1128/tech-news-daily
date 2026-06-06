@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/Users/apple/tech-news-daily/feishu_pipeline.py", line 29, in <module>
-    import feedparser
-ModuleNotFoundError: No module named 'feedparser'
