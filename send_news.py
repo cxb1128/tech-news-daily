@@ -85,8 +85,8 @@ def clean_html(raw):
     return text
 
 
-def extract_summary(entry):
-    """从 RSS entry 提取摘要，不限制字数，完整保留"""
+def extract_summary(entry, max_chars=100):
+    """从 RSS entry 提取摘要，限制在 max_chars 字以内，尽量在句末截断"""
     candidates = [
         entry.get("summary", ""),
         entry.get("description", ""),
@@ -98,7 +98,16 @@ def extract_summary(entry):
     for c in candidates:
         text = clean_html(c)
         if len(text) > 20:  # 有效摘要至少 20 字
-            return text
+            if len(text) <= max_chars:
+                return text
+            # 截断到 max_chars，优先在句号处断句
+            short = text[:max_chars]
+            # 找最后一个句号/问号/感叹号
+            for sep in ["。", "？", "！", ". ", "? ", "! "]:
+                idx = short.rfind(sep)
+                if idx > max_chars * 0.5:  # 至少用了一半才断
+                    return short[:idx + 1]
+            return short + "…"
 
     return ""
 
