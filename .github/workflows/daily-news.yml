@@ -2,8 +2,8 @@ name: 每日科技新闻
 
 on:
   schedule:
-    # 每天早上 6:10 北京时间 (22:10 UTC)
-    - cron: "10 22 * * *"
+    # 目标 6:10 到达，提前 20 分钟补偿 GitHub Actions 延迟 (21:50 UTC = 5:50 CST)
+    - cron: "50 21 * * *"
   workflow_dispatch:  # 支持手动触发
 
 jobs:

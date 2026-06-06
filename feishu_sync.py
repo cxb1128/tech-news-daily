@@ -198,6 +198,79 @@ class FeishuClient:
         text = text.strip()
         return text
 
+    def get_doc_content(self, document_id: str) -> str:
+        """
+        读取文档全部文本内容。
+        从飞书 Docx Block API 获取所有块，拼接为纯文本。
+        """
+        blocks_data = self._request(
+            "GET",
+            f"/docx/v1/documents/{document_id}/blocks",
+            params={"page_size": 500},
+        )
+        blocks = blocks_data.get("data", {}).get("items", [])
+        lines = []
+        for b in blocks:
+            bt = b.get("block_type", 0)
+            # 提取文本内容
+            text = ""
+            block_data = b.get("text") or b.get("heading1") or b.get("heading2") or \
+                         b.get("heading3") or b.get("bullet") or b.get("ordered") or \
+                         b.get("code") or b.get("quote") or {}
+            elements = block_data.get("elements", [])
+            for el in elements:
+                text += el.get("text_run", {}).get("content", "")
+
+            if not text and bt not in (1, 22):
+                continue
+
+            # 按块类型还原为 markdown 标记
+            if bt == 3:  # heading1
+                lines.append(f"# {text}")
+            elif bt == 4:  # heading2
+                lines.append(f"## {text}")
+            elif bt == 5:  # heading3
+                lines.append(f"### {text}")
+            elif bt == 12:  # bullet
+                lines.append(f"- {text}")
+            elif bt == 13:  # ordered
+                lines.append(f"1. {text}")
+            elif bt == 14:  # code
+                lines.append(f"```\n{text}\n```")
+            elif bt == 15:  # quote
+                lines.append(f"> {text}")
+            elif bt == 22:  # divider
+                lines.append("---")
+            elif bt == 2:  # text
+                lines.append(text)
+            # bt == 1 is page block, skip
+
+        return "\n\n".join(lines)
+
+    def append_doc_content(self, document_id: str, markdown_content: str, position: str = "top") -> None:
+        """
+        追加内容到文档（保留已有内容）。
+
+        Args:
+            document_id: 文档 ID
+            markdown_content: 要追加的 Markdown 内容
+            position: "top" 在现有内容前面插入，"bottom" 追加到末尾
+        """
+        # 读取现有内容
+        try:
+            existing = self.get_doc_content(document_id)
+        except Exception:
+            existing = ""
+
+        # 合并内容
+        if position == "top":
+            new_content = markdown_content.strip() + "\n\n---\n\n" + existing
+        else:
+            new_content = existing + "\n\n---\n\n" + markdown_content.strip()
+
+        # 写回
+        self.update_doc_content(document_id, new_content.strip())
+
     def update_doc_content(self, document_id: str, markdown_content: str) -> None:
         """
         更新文档内容。
