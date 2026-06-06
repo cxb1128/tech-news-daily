@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 每日科技新闻邮件发送脚本
-聚合全球科技媒体 RSS，标题+摘要，MyMemory 翻译为中文。
+聚合全球科技媒体 RSS，完整标题+摘要，MyMemory 分段翻译为中文。
 GitHub Actions 每天早上 6:10 CST 自动运行。
 80% 国际内容 + 20% 国内内容。
 """
@@ -11,6 +11,7 @@ import smtplib
 import os
 import sys
 import re
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
@@ -33,6 +34,9 @@ feedparser.USER_AGENT = USER_AGENT
 
 opener = urllib.request.build_opener()
 opener.addheaders = [("User-Agent", USER_AGENT)]
+
+# MyMemory 单次翻译约 500 字符，分段时留余量
+CHUNK_SIZE = 450
 
 # ── RSS 源 ────────────────────────────────────────────
 INTERNATIONAL_FEEDS = {
@@ -82,13 +86,11 @@ def clean_html(raw):
 
 
 def extract_summary(entry):
-    """从 RSS entry 提取摘要，限制长度"""
-    # 优先取 summary，其次 description，其次 content
+    """从 RSS entry 提取摘要，不限制字数，完整保留"""
     candidates = [
         entry.get("summary", ""),
         entry.get("description", ""),
     ]
-    # 有些源把摘要放在 content[0].value
     content_list = entry.get("content", [])
     if content_list:
         candidates.append(content_list[0].get("value", ""))
@@ -96,9 +98,6 @@ def extract_summary(entry):
     for c in candidates:
         text = clean_html(c)
         if len(text) > 20:  # 有效摘要至少 20 字
-            # 限制在 300 字内（翻译后会更短）
-            if len(text) > 300:
-                text = text[:300].rsplit(" ", 1)[0] + "..."
             return text
 
     return ""
@@ -147,24 +146,77 @@ def fetch_feeds():
     return all_entries
 
 
-def translate_text(text):
-    """MyMemory 单条翻译"""
+def _make_translator():
+    """创建 MyMemory 翻译器"""
     from deep_translator import MyMemoryTranslator
-    translator = MyMemoryTranslator(source="en-GB", target="zh-CN")
-    try:
-        return translator.translate(text)
-    except Exception:
+    return MyMemoryTranslator(source="en-GB", target="zh-CN")
+
+
+def translate_long_text(translator, text, max_retries=3):
+    """
+    翻译长文本：自动分段 + 重试。
+    MyMemory 单次限制约 500 字符，超过则按句子边界分段翻译后拼接。
+    失败自动重试，3 次均失败则返回原文。
+    """
+    if not text or not text.strip():
         return text
 
+    # 检测是否已是中文为主
+    chinese_chars = len(re.findall(r'[一-鿿]', text))
+    if chinese_chars > len(text) * 0.5:
+        return text  # 已经是中文，无需翻译
 
-def translate_entries(entries, top_k=12):
-    """
-    先打分筛选出国际条目的候选，再翻译标题+摘要。
-    只翻译最终入选的条目，大幅减少翻译量。
-    """
-    from deep_translator import MyMemoryTranslator
-    translator = MyMemoryTranslator(source="en-GB", target="zh-CN")
+    # 短文本直接翻译
+    if len(text) <= CHUNK_SIZE:
+        for attempt in range(max_retries):
+            try:
+                result = translator.translate(text)
+                if result and result != text:
+                    return result
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(1.5)
+        return text  # 全部重试失败，返回原文
 
+    # 长文本按句子边界分段
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current = ""
+    for s in sentences:
+        if len(current) + len(s) < CHUNK_SIZE:
+            current = current + " " + s if current else s
+        else:
+            if current:
+                chunks.append(current)
+            current = s
+    if current:
+        chunks.append(current)
+
+    # 逐段翻译
+    translated_chunks = []
+    for i, chunk in enumerate(chunks):
+        for attempt in range(max_retries):
+            try:
+                result = translator.translate(chunk)
+                if result and result != chunk:
+                    translated_chunks.append(result)
+                    break
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(1.0)
+        else:
+            # 全部重试失败，保留原文
+            translated_chunks.append(chunk)
+
+    return " ".join(translated_chunks)
+
+
+def translate_entries(entries):
+    """
+    翻译所有国际条目的标题和摘要。
+    标题：短文本直接翻译 + 重试
+    摘要：用分段翻译处理长文本
+    """
     # 找出需要翻译的国际条目
     to_translate = []
     for i, entry in enumerate(entries):
@@ -178,30 +230,32 @@ def translate_entries(entries, top_k=12):
         return entries
 
     total = len(to_translate)
-    print(f"  🌐 MyMemory 翻译 {total} 条英文（标题 + 摘要）...")
+    print(f"  🌐 MyMemory 翻译 {total} 条英文（标题 + 完整摘要）...")
 
+    translator = _make_translator()
     done = 0
+
     for idx in to_translate:
         entry = entries[idx]
         try:
-            # 翻译标题
-            zh_title = translator.translate(entry["title"])
+            # 翻译标题（标题通常短，直接翻）
+            zh_title = translate_long_text(translator, entry["title"])
             if zh_title and zh_title != entry["title"]:
                 entry["title_en"] = entry["title"]
                 entry["title"] = zh_title
 
-            # 翻译摘要
+            # 翻译摘要（可能很长，分段翻译）
             if entry.get("summary"):
-                zh_summary = translator.translate(entry["summary"])
+                zh_summary = translate_long_text(translator, entry["summary"])
                 if zh_summary and zh_summary != entry["summary"]:
                     entry["summary_en"] = entry["summary"]
                     entry["summary"] = zh_summary
 
             done += 1
-            if done % 10 == 0:
+            if done % 5 == 0:
                 print(f"    ⏳ {done}/{total} ...")
         except Exception as e:
-            print(f"    ⚠️ 翻译失败 [{entry['source']}]: {str(e)[:60]}", file=sys.stderr)
+            print(f"    ⚠️ 翻译异常 [{entry['source']}]: {str(e)[:80]}", file=sys.stderr)
 
     print(f"    ✅ 完成 {done}/{total}")
     return entries
@@ -254,7 +308,7 @@ def deduplicate(entries):
 
 
 def select_balanced(entries, count=10, intl_ratio=0.8):
-    """按 80/20 选择 10 条（含摘要后篇幅变长，减少条数）"""
+    """按 80/20 比例选择"""
     intl = [e for e in entries if e["international"]]
     dom = [e for e in entries if not e["international"]]
 
@@ -273,12 +327,14 @@ def select_balanced(entries, count=10, intl_ratio=0.8):
 
 
 def generate_html(entries):
-    """生成 HTML 邮件（含标题+摘要）"""
+    """生成 HTML 邮件（完整标题+摘要，不截断）"""
     date_display = get_date_display()
     total = len(entries)
     intl_count = sum(1 for e in entries if e["international"])
 
-    html = f"""<h1 style="color:#1a73e8;border-bottom:2px solid #1a73e8;padding-bottom:8px">📰 全球科技日报</h1>
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head><body>
+<h1 style="color:#1a73e8;border-bottom:2px solid #1a73e8;padding-bottom:8px">📰 全球科技日报</h1>
 <p style="color:#666;font-size:14px">日期：{date_display}</p>
 
 <div style="background:#f0f7ff;padding:12px 16px;border-radius:8px;margin:16px 0">
@@ -289,29 +345,39 @@ def generate_html(entries):
 </div>
 """
 
-    for entry in entries:
+    for i, entry in enumerate(entries):
         source = escape(entry["source"])
         title = escape(entry["title"])
         link = escape(entry["link"])
         badge = "🌍" if entry["international"] else "🇨🇳"
         summary = escape(entry.get("summary", ""))
 
-        html += f'<div style="margin:20px 0;padding:12px 16px;border-left:3px solid #1a73e8;background:#fafafa;border-radius:0 8px 8px 0">'
-        html += f'<p style="margin:0 0 6px 0;font-size:16px;font-weight:bold;line-height:1.5">{badge} <b>[{source}]</b> {title} <a href="{link}" style="font-size:13px">🔗 原文</a></p>'
+        # 条目编号
+        num = i + 1
+        html += f'<div style="margin:24px 0;padding:14px 18px;border-left:4px solid #1a73e8;background:#fafafa;border-radius:0 8px 8px 0">'
+        html += f'<p style="margin:0 0 6px 0;font-size:17px;font-weight:bold;line-height:1.5">{badge} <b>【{num}】[{source}]</b> {title} <a href="{link}" style="font-size:13px;color:#1a73e8">🔗 原文</a></p>'
 
         # 原标题（翻译前）
         title_en = entry.get("title_en", "")
         if title_en:
-            html += f'<p style="margin:0 0 8px 0;font-size:12px;color:#999">原文标题：{escape(title_en)}</p>'
+            html += f'<p style="margin:0 0 10px 0;font-size:12px;color:#999">原文标题：{escape(title_en)}</p>'
 
-        # 摘要
+        # 完整摘要（不截断）
         if summary:
-            html += f'<p style="margin:0;font-size:14px;color:#444;line-height:1.7">{summary}</p>'
+            html += f'<p style="margin:0;font-size:14px;color:#333;line-height:1.8">{summary}</p>'
+
+        # 分隔线（非最后一条）
+        if i < len(entries) - 1:
+            html += '<hr style="margin-top:14px;border:none;border-top:1px dashed #ddd">'
 
         html += '</div>\n'
 
-    html += """<hr style="margin-top:24px">
-<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| MyMemory 翻译 | 国际占比 ≥80%</p>"""
+    html += """<hr style="margin-top:24px;border:none;border-top:1px solid #ddd">
+<p style="color:#999;font-size:12px">
+📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| MyMemory 翻译 | 国际占比 ≥80%<br>
+📝 摘要为完整内容，无字数限制 — 每篇新闻都讲清楚
+</p>
+</body></html>"""
 
     return html
 
@@ -357,7 +423,7 @@ def main():
         print("❌ 未拉取到任何新闻", file=sys.stderr)
         sys.exit(0)
 
-    # 2. 翻译
+    # 2. 翻译（带分段+重试）
     print()
     entries = translate_entries(entries)
 
@@ -366,7 +432,7 @@ def main():
     entries = deduplicate(entries)
     print(f"📋 去重后 {len(entries)} 条")
 
-    # 4. 精选 10 条（含摘要篇幅长）
+    # 4. 精选 10 条（80/20，完整摘要篇幅长）
     selected = select_balanced(entries, count=10, intl_ratio=0.8)
     intl_sel = sum(1 for e in selected if e["international"])
     print(f"✨ 精选 {len(selected)} 条（🌍 {intl_sel} + 🇨🇳 {len(selected) - intl_sel}）")
@@ -380,8 +446,8 @@ def main():
     print("\n📰 今日新闻：")
     for i, entry in enumerate(selected):
         badge = "🌍" if entry["international"] else "🇨🇳"
-        s = entry.get("summary", "")[:60]
-        print(f"  {i+1}. {badge} [{entry['source']}] {entry['title'][:50]}")
+        s = entry.get("summary", "")[:80]
+        print(f"  {i+1}. {badge} [{entry['source']}] {entry['title'][:60]}")
         if s:
             print(f"     {s}...")
 
