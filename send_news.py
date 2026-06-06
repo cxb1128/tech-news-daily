@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 每日科技新闻邮件发送脚本
-通过 RSS 聚合中文科技媒体头条，生成 HTML 邮件并通过 QQ 邮箱发送。
+通过 RSS 聚合全球中文科技媒体，生成 HTML 邮件并通过 QQ 邮箱发送。
 GitHub Actions 每天早上 6:10 CST 自动运行。
-全中文源，无需翻译。
+80% 国际内容：BBC中文、NYT中文、FT中文、DW、日经中文、联合早报、VOA中文 等。
+全人工翻译中文源，零机器翻译错误。
 """
 
 import feedparser
@@ -34,20 +35,35 @@ feedparser.USER_AGENT = USER_AGENT
 opener = urllib.request.build_opener()
 opener.addheaders = [("User-Agent", USER_AGENT)]
 
-# 全中文 RSS 源 — 无需翻译，直接可用
-RSS_FEEDS = {
+# ── RSS 源（80% 国际 + 20% 国内） ─────────────────────
+# 国际源 — 国际媒体中文版，人工翻译，内容权威
+INTERNATIONAL_FEEDS = {
+    "BBC中文": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+    "纽约时报中文": "https://cn.nytimes.com/rss/",
+    "FT中文网": "https://www.ftchinese.com/rss/feed",
+    "日经中文": "https://cn.nikkei.com/rss.html",
+    "DW中文": "https://rss.dw.com/rdf/rss-chi-all",
+    "联合早报": "https://www.zaobao.com.sg/news/tech/feed",
+    "VOA中文": "https://www.voachinese.com/api/zq$omekvi$omrko",
+    "韩联社中文": "https://cn.yna.co.kr/RSS/news.xml",
+    "路透中文": "https://www.reuters.com/arc/outboundfeeds/v3/all/?outputType=xml&section=technology",
+}
+
+# 国内源 — 补充本土视角
+DOMESTIC_FEEDS = {
     "36氪": "https://36kr.com/feed",
     "IT之家": "https://www.ithome.com/rss/",
-    "品玩": "https://www.pingwest.com/feed/",
-    "机器之心": "https://www.jiqizhixin.com/rss",
-    "雷锋网": "https://www.leiphone.com/feed",
     "少数派": "https://sspai.com/feed",
-    "虎嗅": "https://www.huxiu.com/rss/0.xml",
-    "爱范儿": "https://www.ifanr.com/feed",
-    "极客公园": "https://www.geekpark.net/feed",
     "量子位": "https://www.qbitai.com/feed",
-    "钛媒体": "https://www.tmtpost.com/rss.xml",
 }
+
+
+def get_all_feeds():
+    """合并所有源，国际源排在前面"""
+    feeds = {}
+    feeds.update(INTERNATIONAL_FEEDS)
+    feeds.update(DOMESTIC_FEEDS)
+    return feeds
 
 
 def get_today_str():
@@ -63,8 +79,9 @@ def get_date_display():
 def fetch_feeds():
     """拉取所有 RSS 源"""
     all_entries = []
+    feeds = get_all_feeds()
 
-    for source, url in RSS_FEEDS.items():
+    for source, url in feeds.items():
         try:
             print(f"  📡 拉取 {source} ...", end=" ")
             feed = feedparser.parse(url)
@@ -77,9 +94,9 @@ def fetch_feeds():
                 if not title or not link:
                     continue
 
-                # 过滤纯英文标题（可能是广告或无效条目）
+                # 至少含有中文字符才算有效
                 chinese_chars = len(re.findall(r'[一-鿿]', title))
-                if chinese_chars < 3:
+                if chinese_chars < 2:
                     continue
 
                 pub_date = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -90,11 +107,15 @@ def fetch_feeds():
                     except Exception:
                         pass
 
+                # 标记国际/国内
+                is_international = source in INTERNATIONAL_FEEDS
+
                 all_entries.append({
                     "source": source,
                     "title": title,
                     "link": link,
                     "date": entry_date,
+                    "international": is_international,
                 })
         except Exception as e:
             print(f"  ⚠️  {source} 失败: {e}", file=sys.stderr)
@@ -104,7 +125,7 @@ def fetch_feeds():
 
 
 def score_entry(entry):
-    """打分：日期越近 + 关键词匹配 = 越高分"""
+    """打分：日期 + 关键词 + 国际源加权"""
     score = 0
     today = datetime.now(CST).date()
 
@@ -118,6 +139,10 @@ def score_entry(entry):
     else:
         score += 30
 
+    # 国际源加权 20%，确保 80% 国际内容
+    if entry["international"]:
+        score += 20
+
     hot_keywords = [
         "AI", "ChatGPT", "OpenAI", "Nvidia", "苹果", "Google", "微软",
         "特斯拉", "Meta", "SpaceX", "芯片", "大模型", "发布", "融资",
@@ -125,7 +150,8 @@ def score_entry(entry):
         "人形", "Agent", "开源", "收购", "上市", "突破",
         "Intel", "AMD", "ARM", "DeepSeek", "Starlink", "Copilot",
         "字节", "腾讯", "阿里", "华为", "小米", "比亚迪",
-        "卫星", "火箭", "核聚变", "基因", "电池",
+        "卫星", "核聚变", "基因", "电池", "关税", "制裁",
+        "IPO", "纳斯达克", "硅谷", "欧盟", "白宫",
     ]
     title_lower = entry["title"].lower()
     for kw in hot_keywords:
@@ -136,7 +162,7 @@ def score_entry(entry):
 
 
 def deduplicate(entries):
-    """去重（不同源可能报道同一事件）"""
+    """去重"""
     seen = OrderedDict()
     for entry in entries:
         key = re.sub(r"[^\w\s]", "", entry["title"])
@@ -146,31 +172,60 @@ def deduplicate(entries):
     return list(seen.values())
 
 
-def generate_html(entries, count=15):
+def select_balanced(entries, count=15, intl_ratio=0.8):
+    """
+    按比例选择：80% 国际 + 20% 国内
+    确保国际新闻占主导地位
+    """
+    intl_entries = [e for e in entries if e["international"]]
+    dom_entries = [e for e in entries if not e["international"]]
+
+    intl_count = int(count * intl_ratio)   # 12 条国际
+    dom_count = count - intl_count          # 3 条国内
+
+    # 如果国际内容不够，用国内补；如果国内不够，用国际补
+    actual_intl = min(intl_count, len(intl_entries))
+    actual_dom = min(dom_count, len(dom_entries))
+
+    if actual_intl < intl_count:
+        actual_dom = min(count - actual_intl, len(dom_entries))
+    if actual_dom < dom_count:
+        actual_intl = min(count - actual_dom, len(intl_entries))
+
+    selected = intl_entries[:actual_intl] + dom_entries[:actual_dom]
+    return selected
+
+
+def generate_html(entries):
     """生成 HTML 邮件"""
     date_display = get_date_display()
-    actual_count = min(len(entries), count)
+    actual_count = len(entries)
+    intl_count = sum(1 for e in entries if e["international"])
 
     html = f"""<h1 style="color:#1a73e8;border-bottom:2px solid #1a73e8;padding-bottom:8px">📰 全球科技日报</h1>
 <p style="color:#666;font-size:14px">日期：{date_display}</p>
 
 <div style="background:#f0f7ff;padding:12px 16px;border-radius:8px;margin:16px 0">
-  <p style="margin:0;color:#1a73e8;font-weight:bold">📊 今日共 {actual_count} 条要闻 | 来源：36氪、IT之家、少数派、虎嗅、爱范儿、量子位 等</p>
+  <p style="margin:0;color:#1a73e8;font-weight:bold">
+    🌍 国际新闻 {intl_count} 条（{intl_count * 100 // actual_count}%）| 国内 {actual_count - intl_count} 条 |
+    来源：BBC中文、NYT中文、FT中文、日经中文、DW、联合早报 等
+  </p>
 </div>
 
 <ol style="line-height:2;font-size:15px">
 """
 
-    for entry in entries[:count]:
+    for entry in entries:
         source = escape(entry["source"])
         title = escape(entry["title"])
         link = escape(entry["link"])
-        html += f'  <li><b>[{source}]</b> {title} <a href="{link}">🔗</a></li>\n'
+        badge = "🌍" if entry["international"] else "🇨🇳"
+        html += f'  <li>{badge} <b>[{source}]</b> {title} <a href="{link}">🔗</a></li>\n'
 
     html += """</ol>
 
 <hr style="margin-top:24px">
-<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| 全中文 RSS 源聚合</p>"""
+<p style="color:#999;font-size:12px">📬 由 GitHub Actions 每日自动生成并发送 | 每天早上 6:10（北京时间）| 国际媒体中文版 RSS 聚合</p>"""
 
     return html
 
@@ -205,11 +260,12 @@ def send_email(html_body, subject=None):
 
 def main():
     print(f"📡 开始拉取 RSS 新闻源... ({get_today_str()})")
-    print(f"   共 {len(RSS_FEEDS)} 个中文源\n")
+    print(f"   国际源 {len(INTERNATIONAL_FEEDS)} 个 + 国内源 {len(DOMESTIC_FEEDS)} 个\n")
 
     # 1. 拉取
     entries = fetch_feeds()
-    print(f"\n📥 共拉取 {len(entries)} 条有效条目（已过滤纯英文）")
+    intl_total = sum(1 for e in entries if e["international"])
+    print(f"\n📥 共拉取 {len(entries)} 条（国际 {intl_total} / 国内 {len(entries) - intl_total}）")
 
     if len(entries) == 0:
         print("❌ 未拉取到任何新闻", file=sys.stderr)
@@ -222,12 +278,13 @@ def main():
     entries = deduplicate(entries)
     print(f"📋 去重后剩余 {len(entries)} 条")
 
-    # 4. 取前 15
-    top_n = min(len(entries), 15)
-    print(f"✨ 精选前 {top_n} 条发送")
+    # 4. 按 80/20 比例选择 15 条
+    selected = select_balanced(entries, count=15, intl_ratio=0.8)
+    intl_selected = sum(1 for e in selected if e["international"])
+    print(f"✨ 精选 {len(selected)} 条（🌍 国际 {intl_selected} + 🇨🇳 国内 {len(selected) - intl_selected}）")
 
     # 5. 生成 HTML
-    html = generate_html(entries, count=top_n)
+    html = generate_html(selected)
 
     # 6. 发送
     print("\n📧 发送邮件...")
@@ -235,8 +292,9 @@ def main():
 
     # 7. 摘要
     print("\n📰 今日新闻摘要：")
-    for i, entry in enumerate(entries[:top_n]):
-        print(f"  {i+1}. [{entry['source']}] {entry['title'][:70]}")
+    for i, entry in enumerate(selected):
+        badge = "🌍" if entry["international"] else "🇨🇳"
+        print(f"  {i+1}. {badge} [{entry['source']}] {entry['title'][:70]}")
 
 
 if __name__ == "__main__":
