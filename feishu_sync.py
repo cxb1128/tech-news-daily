@@ -276,8 +276,12 @@ class FeishuClient:
         更新文档内容。
         使用飞书文档块（Block）API 替换全部内容。
         自动将 Markdown 转为飞书 Docx 支持的纯文本块。
+
+        策略：
+        1. PATCH 旧块为空文本（DELETE 不可用，API 无权限）
+        2. 用递增 index 从 0 开始写入新块（保证顺序、出现在最前面）
         """
-        # 先获取现有块并删除
+        # 步骤1: 清空旧块 — 用 PATCH update_text_elements 设为空
         try:
             blocks_data = self._request(
                 "GET",
@@ -285,27 +289,41 @@ class FeishuClient:
                 params={"page_size": 500},
             )
             existing_blocks = blocks_data.get("data", {}).get("items", [])
-            block_ids = [
-                b["block_id"]
-                for b in existing_blocks
-                if b.get("block_type") != 1  # page type
-            ]
-            for bid in block_ids:
+            cleared = 0
+            for b in existing_blocks:
+                bt = b.get("block_type", 0)
+                if bt == 1:  # page block, skip
+                    continue
+                # 确定 block key 名
+                block_key_map = {
+                    2: "text", 3: "heading1", 4: "heading2", 5: "heading3",
+                    12: "bullet", 13: "ordered", 14: "code", 15: "quote",
+                }
+                key_name = block_key_map.get(bt)
+                if not key_name:
+                    continue  # divider/image/table — 跳过
                 try:
                     self._request(
-                        "DELETE",
-                        f"/docx/v1/documents/{document_id}/blocks/{bid}",
-                        params={"document_revision_id": "-1"},
+                        "PATCH",
+                        f"/docx/v1/documents/{document_id}/blocks/{b['block_id']}",
+                        json={
+                            f"update_{key_name}": {
+                                "elements": [{"text_run": {"content": ""}}]
+                            }
+                        },
                     )
+                    cleared += 1
                 except Exception:
                     pass
+            if cleared > 0:
+                print(f"  🧹 清空了 {cleared} 个旧块")
         except Exception:
-            pass  # 新文档可能没有旧块
+            pass
 
-        # 将 Markdown 拆分为段落
+        # 步骤2: 将 Markdown 拆分为段落
         raw_paragraphs = [p.strip() for p in markdown_content.strip().split("\n\n") if p.strip()]
 
-        # 逐个写入
+        # 步骤3: 逐个写入，index 从 0 递增（保证顺序从前往后）
         written = 0
         failed = 0
         for i, para in enumerate(raw_paragraphs):
@@ -326,7 +344,6 @@ class FeishuClient:
                     text = self._strip_inline_markdown(first_line[2:])[:2000]
                     block = self._bullet_block(text)
                 elif first_line.startswith("> "):
-                    # 引用块
                     quote_text = "\n".join(
                         l[2:] if l.startswith("> ") else l
                         for l in lines
@@ -334,23 +351,20 @@ class FeishuClient:
                     text = self._strip_inline_markdown(quote_text)[:2000]
                     block = self._quote_block(text)
                 elif first_line.strip() in ("---", "***", "___"):
-                    # 分隔线
                     block = {"block_type": 22, "divider": {}}
                 else:
-                    # 普通文本块 - 必须先 strip markdown，限制 2000 字符
                     text = self._strip_inline_markdown("\n".join(lines))[:2000]
                     block = self._text_block(text)
 
                 self._request(
                     "POST",
                     f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
-                    json={"children": [block], "index": -1},
+                    json={"children": [block], "index": i},
                 )
                 written += 1
             except Exception as e:
                 failed += 1
                 if failed <= 5:
-                    # 只打印前几个错误，避免刷屏
                     preview = para[:80].replace("\n", " ")
                     print(f"  ⚠️  段落{i}写入失败: {preview}... → {e}")
                 continue

@@ -33,3 +33,4 @@ feishu_*.py
 github_stats_sync.py
 weather_sync.py
 test_feishu_auth.py
+redesign_kb.py
