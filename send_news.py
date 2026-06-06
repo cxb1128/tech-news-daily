@@ -17,7 +17,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from collections import OrderedDict
-from html import escape, strip_tags
+from html import escape
 
 # ── 配置 ──────────────────────────────────────────────
 SMTP_SERVER = "smtp.qq.com"
