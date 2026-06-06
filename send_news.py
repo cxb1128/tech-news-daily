@@ -133,7 +133,7 @@ def translate_entries(entries):
         return entries
 
     print(f"  🌐 MyMemory 翻译 {len(to_translate)} 条英文标题...")
-    translator = MyMemoryTranslator(source="en", target="zh-CN")
+    translator = MyMemoryTranslator(source="en-GB", target="zh-CN")
 
     for idx in to_translate:
         try:
