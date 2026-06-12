@@ -2,8 +2,8 @@ name: 每日科技新闻
 
 on:
   schedule:
-    # 目标 6:10 到达，提前 20 分钟补偿 GitHub Actions 延迟 (21:50 UTC = 5:50 CST)
-    - cron: "50 21 * * *"
+    # 目标 6:10 CST 到达。实测 GH Actions 延迟 ~70min，故设为 21:00 UTC = 5:00 CST
+    - cron: "0 21 * * *"
   workflow_dispatch:  # 支持手动触发
 
 jobs:
