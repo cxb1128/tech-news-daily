@@ -420,6 +420,15 @@ def send_email(html_body, subject=None):
 
 
 def main():
+    # ── 准时发送：sleep 到目标时间 ──
+    TARGET_H, TARGET_M = 6, 5  # 6:05 AM CST
+    now = datetime.now(CST)
+    target = now.replace(hour=TARGET_H, minute=TARGET_M, second=0, microsecond=0)
+    if now < target:
+        wait = (target - now).total_seconds()
+        print(f"⏰ 当前 {now.strftime('%H:%M')} CST，等待 {int(wait // 60)} 分钟后于 {target.strftime('%H:%M')} CST 准时发送...")
+        time.sleep(wait)
+
     print(f"📡 开始拉取 RSS 新闻源... ({get_today_str()})")
     print(f"   国际源 {len(INTERNATIONAL_FEEDS)} + 国内源 {len(DOMESTIC_FEEDS)}\n")
 

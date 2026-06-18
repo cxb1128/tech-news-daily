@@ -2,14 +2,14 @@ name: 每日科技新闻
 
 on:
   schedule:
-    # 目标 6:10 CST 到达。实测 GH Actions 延迟 ~70min，故设为 21:00 UTC = 5:00 CST
+    # Cron 5:00 CST。脚本内 sleep 到 6:05 准时发送，timeout 120min 允许最长 1h 等待
     - cron: "0 21 * * *"
   workflow_dispatch:  # 支持手动触发
 
 jobs:
   send-news:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
 
     steps:
       - name: 检出代码
