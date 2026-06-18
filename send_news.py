@@ -12,7 +12,10 @@ import os
 import sys
 import re
 import time
+import hashlib
+import json
 import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -37,6 +40,17 @@ opener.addheaders = [("User-Agent", USER_AGENT)]
 
 # MyMemory 单次翻译约 500 字符，分段时留余量
 CHUNK_SIZE = 450
+
+# B 站 UP 主「旅客君LookUplus」— 苹果/数码深度评测参考源
+BILIBILI_UP_MID = "13896140"
+BILIBILI_UP_NAME = "旅客君@B站"
+BILIBILI_UP_URL = "https://space.bilibili.com/13896140/video"
+
+# WBI 签名置换表（B站公开算法）
+WBI_ENC_TABLE = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+                 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+                 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+                 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 52, 34, 44]
 
 # ── RSS 源 ────────────────────────────────────────────
 INTERNATIONAL_FEEDS = {
@@ -110,6 +124,103 @@ def extract_summary(entry, max_chars=100):
             return short + "…"
 
     return ""
+
+
+def _http_get_json(url, referer="https://www.bilibili.com/"):
+    """HTTP GET → JSON，bilibili API 需要 Referer"""
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Referer", referer)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def _get_wbi_key():
+    """获取 B 站 WBI 签名密钥（缓存 6h）"""
+    now = time.time()
+    if hasattr(_get_wbi_key, "_cache_time") and (now - _get_wbi_key._cache_time) < 21600:
+        return _get_wbi_key._cached_key
+
+    nav = _http_get_json("https://api.bilibili.com/x/web-interface/nav")
+    wbi = nav["data"]["wbi_img"]
+    img_key = wbi["img_url"].rsplit("/", 1)[-1].split(".")[0]
+    sub_key = wbi["sub_url"].rsplit("/", 1)[-1].split(".")[0]
+    raw = img_key + sub_key
+    mixin = "".join(raw[i] for i in WBI_ENC_TABLE if i < len(raw))[:32]
+
+    _get_wbi_key._cached_key = mixin
+    _get_wbi_key._cache_time = now
+    return mixin
+
+
+def _wbi_sign(params):
+    """对参数字典进行 WBI 签名，追加 wts 和 w_rid"""
+    params["wts"] = int(time.time())
+    ordered = sorted(params.items())
+    query_str = urllib.parse.urlencode(ordered)
+    w_rid = hashlib.md5((query_str + _get_wbi_key()).encode()).hexdigest()
+    params["w_rid"] = w_rid
+    return params
+
+
+def fetch_bilibili_videos(limit=3):
+    """
+    拉取「旅客君LookUplus」最新视频。
+    使用 B 站 WBI 签名 API，返回标准 entry 列表。
+    """
+    entries = []
+    try:
+        params = _wbi_sign({"mid": BILIBILI_UP_MID, "ps": limit, "pn": 1, "order": "pubdate"})
+        query = urllib.parse.urlencode(params)
+        url = f"https://api.bilibili.com/x/space/wbi/arc/search?{query}"
+        data = _http_get_json(url)
+
+        if data["code"] != 0:
+            print(f"  ⚠️  B站API 返回 {data['code']}: {data.get('message', '')}", file=sys.stderr)
+            return entries
+
+        vlist = data["data"]["list"]["vlist"]
+        print(f"  📹 拉取 {BILIBILI_UP_NAME} ... {len(vlist)} 个视频")
+
+        for v in vlist:
+            title = v["title"].strip()
+            bvid = v["bvid"]
+            link = f"https://www.bilibili.com/video/{bvid}"
+            desc = v.get("description", "").strip()
+            created = v.get("created", 0)
+
+            # 解析时间
+            entry_date = None
+            if created:
+                try:
+                    entry_date = datetime.fromtimestamp(created).date()
+                except Exception:
+                    pass
+
+            # 摘要：视频简介，限制 100 字
+            desc_clean = clean_html(desc)
+            if len(desc_clean) > 100:
+                for sep in ["。", "？", "！"]:
+                    idx = desc_clean[:100].rfind(sep)
+                    if idx > 50:
+                        desc_clean = desc_clean[:idx + 1]
+                        break
+                else:
+                    desc_clean = desc_clean[:100] + "…"
+
+            entries.append({
+                "source": BILIBILI_UP_NAME,
+                "title": title,
+                "summary": desc_clean,
+                "link": link,
+                "date": entry_date,
+                "international": False,  # 中文内容，不算国际
+            })
+
+    except Exception as e:
+        print(f"  ⚠️  B站抓取失败: {e}", file=sys.stderr)
+
+    return entries
 
 
 def fetch_feeds():
@@ -349,7 +460,7 @@ def generate_html(entries):
 <div style="background:#f0f7ff;padding:12px 16px;border-radius:8px;margin:16px 0">
   <p style="margin:0;color:#1a73e8;font-weight:bold">
     🌍 国际 {intl_count} 条（{intl_count * 100 // total}%）| 🇨🇳 国内 {total - intl_count} 条 |
-    来源：TechCrunch、The Verge、Ars Technica、MIT TR、BBC、36氪、IT之家 等
+    来源：TechCrunch、The Verge、Ars Technica、MIT TR、BBC、36氪、IT之家、B站旅客君 等
   </p>
 </div>
 """
@@ -430,10 +541,15 @@ def main():
         time.sleep(wait)
 
     print(f"📡 开始拉取 RSS 新闻源... ({get_today_str()})")
-    print(f"   国际源 {len(INTERNATIONAL_FEEDS)} + 国内源 {len(DOMESTIC_FEEDS)}\n")
+    print(f"   国际源 {len(INTERNATIONAL_FEEDS)} + 国内源 {len(DOMESTIC_FEEDS)} + B站 UP 1\n")
 
-    # 1. 拉取
+    # 1. 拉取 RSS
     entries = fetch_feeds()
+
+    # 1.5 拉取 B 站 UP 主最新视频
+    bili_entries = fetch_bilibili_videos(limit=3)
+    entries.extend(bili_entries)
+
     intl_total = sum(1 for e in entries if e["international"])
     print(f"\n📥 共拉取 {len(entries)} 条（🌍 {intl_total} / 🇨🇳 {len(entries) - intl_total}）")
 
